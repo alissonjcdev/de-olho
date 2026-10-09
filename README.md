@@ -42,12 +42,17 @@ Adiciona o @perfil do TikTok na minha lista e roda a lista inteira.
 O que meus concorrentes postaram de novo desde ontem?
 ```
 
+```text
+Quais posts dos perfis da minha lista mais se destacaram essa semana?
+```
+
 Ou rode direto:
 
 ```bash
 python3 skills/de-olho/scripts/olho.py ver youtube @fulano
 python3 skills/de-olho/scripts/olho.py add tiktok @perfil
 python3 skills/de-olho/scripts/olho.py todos
+python3 skills/de-olho/scripts/olho.py todos --dias 7      # só os posts da última semana
 ```
 
 ## Como ele decide o que "bombou"
@@ -79,6 +84,7 @@ Só dá pra ler perfis profissionais (de empresa ou de criador).
 ## Limites
 
 - Só dado público. Não lê stories, mensagens nem seguidores.
+- No YouTube, short antigo vem sem data e fica fora da busca por período.
 - YouTube e TikTok são lidos pelo yt-dlp, que acompanha as mudanças das páginas. Se parar de funcionar, atualize o yt-dlp.
 - Respeite os termos de cada plataforma e use pra pesquisa, não pra copiar o conteúdo dos outros.
 - A lista de perfis e o histórico ficam em `~/.de-olho/` no seu computador.

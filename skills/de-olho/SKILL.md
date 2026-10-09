@@ -29,7 +29,9 @@ python3 scripts/olho.py todos                        # roda a lista inteira
 python3 scripts/olho.py remover youtube @canal
 ```
 
-Opções: `--n 30` (quantos posts ler, padrão 30) e `--json` (saída estruturada, se você for cruzar perfis).
+Opções: `--n 30` (quantos posts ler, padrão 30), `--dias 7` (mostra só os posts dos últimos 7 dias) e `--json` (saída estruturada, se você for cruzar perfis).
+
+Quando a pessoa falar em período ("essa semana", "desde segunda", "no mês"), use `--dias`. A mediana continua sendo a do perfil inteiro, então "vezes a média" compara o post da semana com o normal do perfil. Se o perfil posta muito, aumente o `--n` pra cobrir o período.
 O perfil pode vir como `@nome`, `nome` ou o link do perfil.
 
 ## Como responder
@@ -48,6 +50,7 @@ Explique que é uma configuração única pela API oficial e aponte o README, qu
 
 ## Limites
 
+- No YouTube a data vem exata nos 15 envios mais recentes e aproximada nos vídeos mais antigos. Short antigo vem sem data e fica fora da busca por período; a saída avisa quando isso pode ter escondido algum post.
 - Só dado público. Não lê stories, mensagens nem lista de seguidores.
 - O `yt-dlp` depende das páginas do YouTube e do TikTok. Se um deles mudar, atualize o `yt-dlp` antes de concluir que quebrou.
 - A lista e o histórico ficam em `~/.de-olho/`. Nada é enviado pra fora além das consultas às próprias redes.

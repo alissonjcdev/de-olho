@@ -2,11 +2,11 @@
 """de-olho: acompanha perfis no YouTube, TikTok e Instagram e mostra o que passou da média.
 
 Uso:
-  olho.py ver <rede> <perfil> [--n 30] [--json]
+  olho.py ver <rede> <perfil> [--n 30] [--dias 7] [--json]
   olho.py add <rede> <perfil>
   olho.py remover <rede> <perfil>
   olho.py lista
-  olho.py todos [--n 30] [--json]
+  olho.py todos [--n 30] [--dias 7] [--json]
   olho.py checar
 
 Redes: youtube, tiktok, instagram. YouTube e TikTok não pedem login nem chave
@@ -23,6 +23,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
+from datetime import datetime
 from pathlib import Path
 
 CASA = Path(os.environ.get("DE_OLHO_HOME", Path.home() / ".de-olho"))
@@ -53,41 +55,71 @@ def env(nome):
     return None
 
 
-def ytdlp(url, n):
+def epoca(v):
+    """Data do post em segundos, venha como número (yt-dlp) ou texto ISO (API da Meta, RSS)."""
+    if isinstance(v, (int, float)):
+        return int(v)
+    try:
+        return int(datetime.strptime(v, "%Y-%m-%dT%H:%M:%S%z").timestamp())
+    except (TypeError, ValueError):
+        return None
+
+
+def ytdlp(url, n, extra=()):
     if not shutil.which("yt-dlp"):
         raise Erro("O yt-dlp não está instalado. Instale com: brew install yt-dlp (Mac) ou pipx install yt-dlp.")
     r = subprocess.run(
-        ["yt-dlp", "--flat-playlist", "--playlist-end", str(n), "-J", "--no-warnings", url],
+        ["yt-dlp", "--flat-playlist", "--playlist-end", str(n), "-J", "--no-warnings", *extra, url],
         capture_output=True, text=True, timeout=180,
     )
     if r.returncode != 0 or not r.stdout.strip():
         raise Erro("Não consegui ler esse perfil: " + (r.stderr.strip().splitlines() or ["sem detalhe"])[-1][:200])
-    return json.loads(r.stdout).get("entries") or []
+    return json.loads(r.stdout)
+
+
+def datas_rss(canal):
+    """Data exata dos 15 envios mais recentes do canal (vídeos e shorts), pelo feed público."""
+    try:
+        with urllib.request.urlopen(f"https://www.youtube.com/feeds/videos.xml?channel_id={canal}", timeout=20) as r:
+            raiz = ET.parse(r).getroot()
+    except (urllib.error.URLError, ET.ParseError, TimeoutError):
+        return {}
+    ns = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
+    return {e.findtext("yt:videoId", namespaces=ns): epoca(e.findtext("a:published", namespaces=ns))
+            for e in raiz.findall("a:entry", ns)}
 
 
 def youtube(perfil, n):
-    posts = []
+    posts, canal = [], None
     for aba in ("videos", "shorts"):
         try:
-            itens = ytdlp(f"https://www.youtube.com/@{perfil}/{aba}", n)
+            # a listagem só traz a data aproximada ("há 2 dias"), e só na aba de vídeos
+            pagina = ytdlp(f"https://www.youtube.com/@{perfil}/{aba}", n, ("--extractor-args", "youtubetab:approximate_date"))
         except Erro:
             if aba == "videos":
                 raise
             continue
-        for e in itens:
+        canal = canal or pagina.get("channel_id")
+        for e in pagina.get("entries") or []:
             if e.get("view_count") is None:
                 continue
             posts.append({
                 "id": e.get("id"), "tipo": "short" if aba == "shorts" else "vídeo",
                 "titulo": (e.get("title") or "").strip(), "url": e.get("url") or f"https://www.youtube.com/watch?v={e.get('id')}",
-                "views": e["view_count"], "metrica": e["view_count"],
+                "views": e["view_count"], "data": e.get("timestamp"), "metrica": e["view_count"],
             })
+    exatas = datas_rss(canal) if canal else {}
+    piso = min(filter(None, exatas.values()), default=None)
+    for p in posts:
+        p["data"] = exatas.get(p["id"]) or p["data"]
+        if not p["data"] and piso:
+            p["antes_de"] = piso  # short fora do feed: é mais antigo que o envio mais velho do feed
     return posts, "views"
 
 
 def tiktok(perfil, n):
     posts = []
-    for e in ytdlp(f"https://www.tiktok.com/@{perfil}", n):
+    for e in ytdlp(f"https://www.tiktok.com/@{perfil}", n).get("entries") or []:
         if e.get("view_count") is None:
             continue
         posts.append({
@@ -134,7 +166,7 @@ def mediana(valores):
     return v[len(v) // 2] if v else 0
 
 
-def ver(rede, perfil, n):
+def ver(rede, perfil, n, dias=None):
     perfil = limpar(perfil)
     posts, metrica = LEITORES[rede](perfil, n)
     if not posts:
@@ -143,16 +175,26 @@ def ver(rede, perfil, n):
     for p in posts:
         p["vezes"] = round(p["metrica"] / med, 1)
         p["vezes_txt"] = f"{p['vezes']:.1f}".replace(".", ",") + "x"
+        quando = epoca(p.get("data"))
+        p["dias"] = round((time.time() - quando) / 86400, 1) if quando else None
     CASA.mkdir(parents=True, exist_ok=True)
     arq = CASA / f"{rede}-{perfil}.json"
     antes = set(json.loads(arq.read_text()).get("ids", [])) if arq.exists() else None
     for p in posts:
         p["novo"] = antes is not None and p["id"] not in antes
     arq.write_text(json.dumps({"ids": sorted({p["id"] for p in posts} | (antes or set())), "visto": int(time.time())}))
-    return {
+    r = {
         "rede": rede, "perfil": perfil, "metrica": metrica, "mediana": med, "primeira_vez": antes is None,
-        "posts": sorted(posts, key=lambda p: -p["metrica"]),
+        "lidos": len(posts),
     }
+    if dias:
+        # a mediana continua sendo a do perfil inteiro; o período só escolhe o que mostrar
+        corte = time.time() - dias * 86400
+        r["dias"] = dias
+        r["sem_data"] = sum(p["dias"] is None and p.get("antes_de", corte) >= corte for p in posts)
+        posts = [p for p in posts if p["dias"] is not None and p["dias"] <= dias]
+    r["posts"] = sorted(posts, key=lambda p: -p["metrica"])
+    return r
 
 
 def num(v):
@@ -164,8 +206,19 @@ def num(v):
     return str(v)
 
 
+def idade(p):
+    if p["dias"] is None:
+        return ""
+    return "hoje · " if p["dias"] < 1 else f"há {round(p['dias'])} d · "
+
+
 def texto(r, topo=8):
-    linhas = [f"## {r['rede']} · @{r['perfil']}", f"{len(r['posts'])} posts lidos · mediana {num(r['mediana'])} ({r['metrica']})", ""]
+    linhas = [f"## {r['rede']} · @{r['perfil']}", f"{r['lidos']} posts lidos · mediana {num(r['mediana'])} ({r['metrica']})", ""]
+    if r.get("dias"):
+        aviso = f" ({r['sem_data']} sem data podem ter ficado de fora)" if r["sem_data"] else ""
+        linhas[1] += f" · {len(r['posts'])} nos últimos {r['dias']} dias{aviso}"
+        if not r["posts"]:
+            return "\n".join(linhas + ["Nenhum post nesse período."])
     novos = [p for p in r["posts"] if p["novo"]]
     if r["primeira_vez"]:
         linhas.append("Primeira leitura desse perfil. Da próxima vez eu aviso o que é novo.")
@@ -175,7 +228,7 @@ def texto(r, topo=8):
     else:
         linhas.append("Nada novo desde a última vez.")
     linhas += ["", "Os que mais passaram da média:"]
-    linhas += [f"- {p['vezes_txt']} · {num(p['metrica'])} · {p['tipo']} · {p['titulo'][:70]} · {p['url']}" for p in r["posts"][:topo]]
+    linhas += [f"- {p['vezes_txt']} · {num(p['metrica'])} · {p['tipo']} · {idade(p)}{p['titulo'][:70]} · {p['url']}" for p in r["posts"][:topo]]
     return "\n".join(linhas)
 
 
@@ -196,6 +249,12 @@ def checar():
     print(f"Perfis na lista: {len(ler_lista())}")
 
 
+def opcoes(s):
+    s.add_argument("--n", type=int, default=30, help="quantos posts ler")
+    s.add_argument("--dias", type=int, help="mostrar só os posts dos últimos N dias")
+    s.add_argument("--json", action="store_true")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Acompanha perfis e mostra o que passou da média.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -204,11 +263,8 @@ def main():
         s.add_argument("rede", choices=REDES)
         s.add_argument("perfil")
         if nome == "ver":
-            s.add_argument("--n", type=int, default=30)
-            s.add_argument("--json", action="store_true")
-    s = sub.add_parser("todos")
-    s.add_argument("--n", type=int, default=30)
-    s.add_argument("--json", action="store_true")
+            opcoes(s)
+    opcoes(sub.add_parser("todos"))
     sub.add_parser("lista")
     sub.add_parser("checar")
     a = ap.parse_args()
@@ -226,7 +282,7 @@ def main():
             gravar_lista(itens)
             print(f"{'Adicionado' if a.cmd == 'add' else 'Removido'}: {a.rede} @{item['perfil']} ({len(itens)} na lista)")
         elif a.cmd == "ver":
-            r = ver(a.rede, a.perfil, a.n)
+            r = ver(a.rede, a.perfil, a.n, a.dias)
             print(json.dumps(r, ensure_ascii=False, indent=1) if a.json else texto(r))
         elif a.cmd == "todos":
             itens = ler_lista()
@@ -235,7 +291,7 @@ def main():
             saida = []
             for i in itens:
                 try:
-                    saida.append(ver(i["rede"], i["perfil"], a.n))
+                    saida.append(ver(i["rede"], i["perfil"], a.n, a.dias))
                 except Erro as e:
                     saida.append({"rede": i["rede"], "perfil": i["perfil"], "erro": str(e)})
             if a.json:
